@@ -25,9 +25,17 @@ class pthread_create(angr.SimProcedure):
         # Execute each block
         state = blank_state
         for b in blocks:
-            irsb = self.project.factory.default_engine.process(state, b,
-                    force_addr=next(iter(stmt for stmt in b.statements if isinstance(stmt, pyvex.IRStmt.IMark))).addr
-                                                  )
+            isn_addrs = iter([stmt.addr for stmt in b.statements if isinstance(stmt, pyvex.IRStmt.IMark)])
+
+            decoding_error = True
+            force_addr = next(isn_addrs)
+            while decoding_error:
+                try:
+                    irsb = self.project.factory.default_engine.process(state, b, force_addr=force_addr)
+                    decoding_error = False
+                except angr.errors.SimIRSBNoDecodeError:
+                    force_addr = next(isn_addrs)
+                                                  
             if irsb.successors:
                 state = irsb.successors[0]
             else:

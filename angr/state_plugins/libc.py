@@ -246,11 +246,13 @@ class SimStateLibc(SimStatePlugin):
 
     @property
     def errno(self):
-        return self.state.mem[self.errno_location].int.resolved
+        if self.errno_location:
+            return self.state.mem[self.errno_location].int.resolved
 
     @errno.setter
     def errno(self, val):
-        self.state.mem[self.errno_location].int = val
+        if self.errno_location:
+            self.state.mem[self.errno_location].int = val
 
     def ret_errno(self, val):
         try:

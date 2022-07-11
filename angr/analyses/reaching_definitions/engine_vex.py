@@ -168,7 +168,13 @@ class SimEngineRDVEX(
                 l.info('Memory address undefined, ins_addr = %#x.', self.ins_addr)
             else:
                 if any(type(d) is Undefined for d in data):
-                    l.info('Data to write at address %#x undefined, ins_addr = %#x.', a, self.ins_addr)
+                    if isinstance(a, int):
+                        l.info('Data to write at address %#x undefined, ins_addr = %#x.', a, self.ins_addr)
+                    else:
+                        l.info('Data to write at address %s undefined, ins_addr = %#x.', a, self.ins_addr)
+
+                if isinstance(a, RegisterOffset) and a.reg == 'sp':
+                    a = SpOffset(a.bits, a.offset)
 
                 if (
                     isinstance(a, int) or
@@ -177,12 +183,17 @@ class SimEngineRDVEX(
                 ):
                     tags: Optional[Set[Tag]]
                     if isinstance(a, SpOffset):
-                        function_address = (
-                            self.project.kb
-                                .cfgs['CFGFast']
-                                .get_all_nodes(self._codeloc().ins_addr, anyaddr=True)[0]
-                                .function_address
-                        )
+                        try:
+                            function_address = (
+                                self.project.kb
+                                    .cfgs['CFGFast']
+                                    .get_all_nodes(self._codeloc().ins_addr, anyaddr=True)[0]
+                                    .function_address
+                            )
+                        except IndexError:
+                            l.error("Could not resolve function address at %s" % hex(self._codeloc().ins_addr))
+                            function_address = None
+
                         tags = {LocalVariableTag(
                             function = function_address,
                             metadata = {'tagged_by': 'SimEngineRDVEX._store_core'}
@@ -194,6 +205,9 @@ class SimEngineRDVEX(
                     # different addresses are not killed by a subsequent iteration, because kill only removes entries
                     # with same index and same size
                     self.state.kill_and_add_definition(memloc, self._codeloc(), data, tags=tags)
+
+                else:
+                    l.warning("Unsupported address type %s" % a)
 
     def _handle_LoadG(self, stmt):
         guard: DataSet = self._expr(stmt.guard)
@@ -241,7 +255,10 @@ class SimEngineRDVEX(
             # store-conditional
             storedata = self._expr(stmt.storedata)
             addr = self._expr(stmt.addr)
-            size = self.tyenv.sizeof(stmt.storedata.tmp) // self.arch.byte_width
+            if isinstance(stmt.storedata, pyvex.expr.Const):
+                size = stmt.storedata.result_size(self.tyenv)
+            else:
+                size = self.tyenv.sizeof(stmt.storedata.tmp) // self.arch.byte_width
 
             self._store_core(addr, size, storedata)
             self.tmps[stmt.result] = DataSet({1}, 1)
@@ -480,6 +497,24 @@ class SimEngineRDVEX(
         # l.warning('Comparison of multiple values / different types.')
         return DataSet({True, False}, expr.result_size(self.tyenv))
 
+    def _handle_CmpLE(self, expr):
+        arg0, arg1 = expr.args
+        expr_0 = self._expr(arg0)
+        if expr_0 is None:
+            return None
+        expr_1 = self._expr(arg1)
+        if expr_1 is None:
+            return None
+
+        if len(expr_0) == 1 and len(expr_1) == 1:
+            e0 = expr_0.get_first_element()
+            e1 = expr_1.get_first_element()
+            if isinstance(e0, int) and isinstance(e1, int):
+                return DataSet(e0 <= e1, expr.result_size(self.tyenv))
+
+        # l.warning('Comparison of multiple values / different types.')
+        return DataSet({True, False}, expr.result_size(self.tyenv))
+
     def _handle_CmpLT(self, expr):
         arg0, arg1 = expr.args
         expr_0 = self._expr(arg0)
@@ -605,7 +640,7 @@ class SimEngineRDVEX(
                     self._visited_blocks,
                     self._dep_graph,
                     src_ins_addr=self.ins_addr,
-                    codeloc=codeloc,
+                    codeloc=codeloc
                 )
                 if executed_rda:
                     # update everything
@@ -649,7 +684,7 @@ class SimEngineRDVEX(
                     atom = Register(reg_offset, reg_size)
                 elif isinstance(arg, SimStackArg):
                     atom = MemoryLocation(SpOffset(self.arch.bits,
-                                          arg.stack_offset),
+                                          arg.stack_offset + self.state.get_sp().offset),
                                           arg.size * self.arch.byte_width)
                 self.state.add_use(atom, code_loc)
                 self._tag_definitions_of_atom(atom, func_addr_int)

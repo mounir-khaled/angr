@@ -508,8 +508,11 @@ class SimEngineLightVEXMixin:
             return None
 
         try:
-            if expr_1 < 0:
-                return expr_0 << -expr_1
+            if isinstance(expr_0, int) and isinstance(expr_1, int):
+                if expr_1 < 0:
+                    return expr_0 << -expr_1
+                else:
+                    return expr_0 >> expr_1
             else:
                 return expr_0 >> expr_1
         except TypeError as e:
