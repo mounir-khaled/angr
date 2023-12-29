@@ -448,7 +448,11 @@ class LiveDefinitions:
                 else:
                     l.warning("Skip stack storing since the stack offset is None.")
             elif isinstance(atom.addr, HeapAddress):
-                self.heap_definitions.store(atom.addr.value, d, size=atom.size, endness=endness)
+                if atom.addr.value is None:
+                    l.warning("Skip heap storing since the heap address value is None.")
+                else:
+                    self.heap_definitions.store(atom.addr.value, d, size=atom.size, endness=endness)
+
             elif isinstance(atom.addr, int):
                 self.memory_definitions.store(atom.addr, d, size=atom.size, endness=endness)
             elif isinstance(atom.addr, claripy.ast.Base):
@@ -473,7 +477,7 @@ class LiveDefinitions:
                 self.tmps[atom.tmp_idx] = self.uses_by_codeloc[code_loc]
                 return None
         else:
-            raise NotImplementedError()
+            raise NotImplementedError("Store atom of type %s", type(atom))
 
         return d
 

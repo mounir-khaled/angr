@@ -1,6 +1,8 @@
 import claripy
 from ..errors import SimMemoryError
+import logging
 
+l = logging.getLogger(__name__)
 
 def obj_bit_size(o):
     if type(o) is bytes:
@@ -97,9 +99,15 @@ class SimMemoryObject:
                 else:
                     raise
                 thing = bv_slice(self.object, offset, length, self.endness == "Iend_LE", self._byte_width)
+            except Exception:
+                return self.object
 
             if self.endness != endness:
-                thing = thing.reversed
+                try:
+                    thing = thing.reversed
+                except AttributeError:
+                    pass
+
             return thing
 
     def _object_equals(self, other):

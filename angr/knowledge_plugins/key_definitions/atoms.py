@@ -62,6 +62,15 @@ class GuardUse(Atom):
         super().__init__()
         self.target = target
 
+    def __eq__(self, other):
+        if isinstance(other, GuardUse):
+            return self.target == other.target
+
+        return NotImplemented
+
+    def __hash__(self):
+        return hash(self.target)
+
     def __repr__(self):
         return "<Guard %#x>" % self.target
 

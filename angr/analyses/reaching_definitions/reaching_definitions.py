@@ -3,6 +3,11 @@ from typing import Optional, DefaultDict, Dict, List, Tuple, Set, Any, Union, TY
 from collections import defaultdict
 
 import ailment
+from angr.code_location import CodeLocation
+from angr.errors import SimMemoryError
+from angr.knowledge_plugins.key_definitions.atoms import Register
+from angr.knowledge_plugins.key_definitions.tag import Tag
+from angr.storage.memory_mixins.paged_memory.pages.multi_values import MultiValues
 import pyvex
 from ..forward_analysis.visitors.graph import NodeType
 
@@ -29,6 +34,10 @@ if TYPE_CHECKING:
     ObservationPoint = Tuple[Literal["insn", "node", "stmt"], Union[int, Tuple[int, int]], ObservationPointType]
 
 l = logging.getLogger(name=__name__)
+
+
+class MergedValueTag(Tag):
+    pass
 
 
 class ReachingDefinitionsAnalysis(
@@ -401,6 +410,40 @@ class ReachingDefinitionsAnalysis(
     # pylint: disable=no-self-use
     def _merge_states(self, _node, *states: ReachingDefinitionsState):
         merged_state, merge_occurred = states[0].merge(*states[1:])
+
+        arch = self.project.arch
+        livedefs = merged_state.live_definitions
+        try:
+            sp_mv: MultiValues = livedefs.register_definitions.load(arch.sp_offset, arch.bytes)
+            sp_vals = list(sp_mv[0])
+        except (SimMemoryError, KeyError) as e:
+            sp_vals = []
+
+        if not sp_vals:
+            l.error("Failed to recover stack offset after merge (%s, %s)", _node, sp_vals)
+        elif len(sp_vals) > 1:
+            sp_val_iter = iter(sp_vals)
+            min_sp_val = next(sp_val_iter, None)
+            max_sp_offset = None
+            while max_sp_offset is None and min_sp_val is not None:
+                max_sp_offset = livedefs.get_stack_offset(min_sp_val)
+                if max_sp_offset is not None:
+                    break
+
+                l.warning("Failed to get stack offset from %s", min_sp_val)
+                min_sp_val = next(sp_val_iter, None)
+
+            for sp_val in sp_val_iter:
+                off = livedefs.get_stack_offset(sp_val)
+                if off is not None and off > max_sp_offset:
+                    min_sp_val = sp_val
+                    max_sp_offset = off
+
+            if max_sp_offset is None:
+                l.warning("Failed to recover stack offset after merge (%s, %s)", _node, sp_vals)
+            else:
+                livedefs.register_definitions.store(arch.sp_offset, min_sp_val)
+
         return merged_state, not merge_occurred
 
     def _run_on_node(self, node, state: ReachingDefinitionsState):

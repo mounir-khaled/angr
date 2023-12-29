@@ -1,4 +1,6 @@
 from itertools import chain
+import itertools
+import random
 from typing import Optional, Iterable, Set, Union, TYPE_CHECKING, Tuple
 import logging
 
@@ -16,7 +18,7 @@ from ...utils.constants import DEFAULT_STATEMENT
 from ...knowledge_plugins.key_definitions.live_definitions import Definition, LiveDefinitions
 from ...knowledge_plugins.functions import Function
 from ...knowledge_plugins.key_definitions.tag import LocalVariableTag, ParameterTag, ReturnValueTag, Tag
-from ...knowledge_plugins.key_definitions.atoms import Atom, Register, MemoryLocation, Tmp
+from ...knowledge_plugins.key_definitions.atoms import Atom, Register, MemoryLocation, Tmp, ConstantSrc
 from ...knowledge_plugins.key_definitions.constants import OP_BEFORE, OP_AFTER
 from ...knowledge_plugins.key_definitions.heap_address import HeapAddress
 from ...knowledge_plugins.key_definitions.undefined import Undefined
@@ -331,6 +333,9 @@ class SimEngineRDVEX(
             return self.tmps[tmp]
         return None
 
+    # def _handle_GetI(self, expr: pyvex.IRExpr.GetI):
+    #     print("GETI %s" % expr)
+
     # e.g. t0 = GET:I64(rsp), rsp might be defined multiple times
     def _handle_Get(self, expr: pyvex.IRExpr.Get) -> MultiValues:
         reg_offset: int = expr.offset
@@ -417,14 +422,15 @@ class SimEngineRDVEX(
             elif self.state.is_heap_address(addr):
                 # Load data from the heap
                 heap_offset = self.state.get_heap_offset(addr)
-                try:
-                    vs: MultiValues = self.state.heap_definitions.load(heap_offset, size=size, endness=endness)
-                    defs = set(LiveDefinitions.extract_defs_from_mv(vs))
-                except SimMemoryMissingError:
-                    continue
+                if heap_offset is not None:
+                    try:
+                        vs: MultiValues = self.state.heap_definitions.load(heap_offset, size=size, endness=endness)
+                        defs = set(LiveDefinitions.extract_defs_from_mv(vs))
+                    except SimMemoryMissingError:
+                        continue
 
-                self.state.add_heap_use_by_defs(defs, self._codeloc())
-                result = result.merge(vs) if result is not None else vs
+                    self.state.add_heap_use_by_defs(defs, self._codeloc())
+                    result = result.merge(vs) if result is not None else vs
 
             else:
                 addr_v = addr._model_concrete.value
@@ -564,6 +570,44 @@ class SimEngineRDVEX(
         r = MultiValues(self.state.top(bits))
         return r
 
+    def handle_64HIto32(self, expr):
+        _ = self._expr(expr.args[0])
+        bits = expr.result_size(self.tyenv)
+        # Need to actually implement this later
+        r = MultiValues(self.state.top(bits))
+        return r
+
+    def _handle_32HLto64(self, expr):
+        expr0, expr1 = self._expr(expr.args[0]), self._expr(expr.args[1])
+        bits = expr.result_size(self.tyenv)
+
+        r = None
+        expr0_v = expr0.one_value()
+        expr1_v = expr1.one_value()
+
+        if expr0_v is None and expr1_v is None:
+            # we do not support addition between two real multivalues
+            r = MultiValues(self.state.top(bits))
+        elif expr0_v is None and expr1_v is not None:
+            # adding a single value to a multivalue
+            if expr0.count() == 1 and 0 in expr0:
+                # vs = {v.sign_extend(expr1_v.size() - v.size()) + expr1_v for v in expr0[0]}
+                vs = {claripy.Concat(v, expr1_v) for v in expr0[0]}
+                r = MultiValues(offset_to_values={0: vs})
+        elif expr0_v is not None and expr1_v is None:
+            # adding a single value to a multivalue
+            if expr1.count() == 1 and 0 in expr1:
+                vs = {claripy.Concat(expr0_v, v) for v in expr1[0]}
+                r = MultiValues(offset_to_values={0: vs})
+        else:
+            # adding two single values together
+            r = MultiValues(claripy.Concat(expr0_v, expr1_v))
+
+        if r is None:
+            r = MultiValues(self.state.top(bits))
+
+        return r
+
     def _handle_Add(self, expr):
         expr0, expr1 = self._expr(expr.args[0]), self._expr(expr.args[1])
         bits = expr.result_size(self.tyenv)
@@ -692,10 +736,37 @@ class SimEngineRDVEX(
         return r
 
     def _handle_DivMod(self, expr):
-        _, _ = self._expr(expr.args[0]), self._expr(expr.args[1])
+        expr0, expr1 = self._expr(expr.args[0]), self._expr(expr.args[1])
         bits = expr.result_size(self.tyenv)
 
-        r = MultiValues(self.state.top(bits))
+        r = None
+        expr0_v = expr0.one_value()
+        expr1_v = expr1.one_value()
+
+        if expr0_v is None and expr1_v is None:
+            # we do not support division between two real multivalues
+            r = MultiValues(self.state.top(bits))
+        elif expr0_v is None and expr1_v is not None:
+            expr1_v = expr1_v.zero_extend(bits - expr1_v.size())
+            if expr0.count() == 1 and 0 in expr0:
+                vs = {v % expr1_v for v in expr0[0]}
+                r = MultiValues(offset_to_values={0: vs})
+        elif expr0_v is not None and expr1_v is None:
+            expr0_v = expr0_v.zero_extend(bits - expr0_v.size())
+            if expr1.count() == 1 and 0 in expr1:
+                vs = {v.zero_extend(bits - v.size()) % expr0_v for v in expr1[0]}
+                r = MultiValues(offset_to_values={0: vs})
+        else:
+            if expr1_v.concrete:
+                # dividing two single values
+                expr1_v_concrete = expr1_v._model_concrete.value
+                if expr1_v_concrete == 0:
+                    r = MultiValues(self.state.top(bits))
+                else:
+                    r = MultiValues(expr0_v % expr1_v_concrete)
+
+        if r is None:
+            r = MultiValues(self.state.top(bits))
 
         return r
 
@@ -929,6 +1000,9 @@ class SimEngineRDVEX(
 
         return MultiValues(self.state.top(1))
 
+    def _top(self, size: int):
+        return MultiValues(self.state.top(size))
+
     def _handle_CmpNE(self, expr):
         arg0, arg1 = expr.args
         expr_0 = self._expr(arg0)
@@ -1034,9 +1108,9 @@ class SimEngineRDVEX(
         func_addr_v = func_addr.one_value()
         if func_addr_v is None or self.state.is_top(func_addr_v):
             # probably an indirect call
-            _, state = self._function_handler.handle_indirect_call(self.state, src_codeloc=self._codeloc())
+            ran_rda, state = self._function_handler.handle_indirect_call(self.state, src_codeloc=self._codeloc())
             self.state = state
-            return False
+            return ran_rda
 
         if not func_addr_v.concrete:
             try:
@@ -1045,9 +1119,10 @@ class SimEngineRDVEX(
                 )
                 state: ReachingDefinitionsState
                 self.state = state
+                return executed_rda
             except NotImplementedError:
                 l.warning("Please implement the unknown function handler with your own logic.")
-            return False
+                return False
 
         func_addr_int: int = func_addr_v._model_concrete.value
 
@@ -1102,10 +1177,14 @@ class SimEngineRDVEX(
         if func_addr is not None and self.functions is not None:
             func_addr_v = func_addr.one_value()
             if func_addr_v is not None and not self.state.is_top(func_addr_v):
-                func_addr_int = func_addr_v._model_concrete.value
-                if self.functions.contains_addr(func_addr_int):
-                    _cc = self.functions[func_addr_int].calling_convention
-                    proto = self.functions[func_addr_int].prototype
+                try:
+                    func_addr_int = func_addr_v._model_concrete.value
+                except AttributeError:
+                    pass
+                else:
+                    if self.functions.contains_addr(func_addr_int):
+                        _cc = self.functions[func_addr_int].calling_convention
+                        proto = self.functions[func_addr_int].prototype
 
         cc: SimCC = _cc or DEFAULT_CC.get(self.arch.name, None)(self.arch)
 
@@ -1180,7 +1259,8 @@ class SimEngineRDVEX(
                         )
                         self._tag_definitions_of_atom(atom, func_addr_int)
                 else:
-                    raise TypeError("Unsupported argument type %s" % type(arg))
+                    # raise TypeError("Unsupported argument type %s" % type(arg))
+                    l.error("Unsupported argument type %s" % type(arg))
 
         if cc.RETURN_VAL is not None:
             if isinstance(cc.RETURN_VAL, SimRegArg):

@@ -301,6 +301,12 @@ class ReachingDefinitionsState:
         sp = self.annotate_with_def(self._initial_stack_pointer(), sp_def)
         self.register_definitions.store(self.arch.sp_offset, sp)
 
+        # initialize base pointer
+        bp_atom = Register(self.arch.bp_offset, self.arch.bytes)
+        bp_def = Definition(bp_atom, ExternalCodeLocation(call_string), tags={InitialValueTag()})
+        bp = self.annotate_with_def(self._initial_stack_pointer(), bp_def)
+        self.register_definitions.store(self.arch.bp_offset, bp)
+
         if self.arch.name.startswith("MIPS"):
             if func_addr is None:
                 l.warning("func_addr must not be None to initialize a function in mips")

@@ -1191,7 +1191,11 @@ class SimCCCdecl(SimCC):
             locs.append(next(session.both_iter))
             locs_size += locs[-1].size
 
-        return refine_locs_with_struct_type(self.arch, locs, arg_type)
+        try:
+            return refine_locs_with_struct_type(self.arch, locs, arg_type)
+        except TypeError as e:
+            l.warning("next_arg TypeError: %s, treating as void pointer", e)
+            return refine_locs_with_struct_type(self.arch, locs, SimTypePointer(SimTypeBottom()).with_arch(self.arch))
 
     STRUCT_RETURN_THRESHOLD = 32
 
