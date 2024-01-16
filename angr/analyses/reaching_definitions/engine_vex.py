@@ -797,6 +797,25 @@ class SimEngineRDVEX(
                 r = MultiValues(expr0_v & expr1_v)
 
         if r is None:
+            # HACK: special case when aligning stack pointer in function prologue
+            # just leave it as is :)
+            if expr0_v is not None and expr1_v is not None:
+                sp = None
+                valid_algn_mask = False
+                if self.state.is_stack_address(expr0_v):
+                    sp = expr0_v
+                    # Heuristic: If it's a value > 0xffff_ff00 (when dealing with 32 bits)
+                    # Then it's probably an alignment mask
+                    valid_algn_mask = expr1_v.concrete and claripy.is_true(expr1_v > (2**self.arch.bits - 1 - 0xFF))
+
+                elif self.state.is_stack_address(expr1_v):
+                    sp = expr1_v
+                    valid_algn_mask = expr0_v.concrete and claripy.is_true(expr0_v > (2**self.arch.bits - 1 - 0xFF))
+
+                if valid_algn_mask and sp is not None:
+                    r = MultiValues(sp)
+
+        if r is None:
             r = MultiValues(self.state.top(bits))
 
         return r
@@ -1193,6 +1212,7 @@ class SimEngineRDVEX(
         # - kill return value registers
         # - caller-saving registers
         atom: Atom
+        arg_stack_change = 0
         if proto and proto.args:
             code_loc = self._codeloc()
             for arg in cc.arg_locs(proto):
@@ -1204,6 +1224,7 @@ class SimEngineRDVEX(
                     self._tag_definitions_of_atom(atom, func_addr_int)
                 elif isinstance(arg, SimStackArg):
                     self.state.add_stack_use(arg.stack_offset, arg.size, self.arch.memory_endness, code_loc)
+                    arg_stack_change += arg.size
 
                     atom = MemoryLocation(SpOffset(self.arch.bits, arg.stack_offset), arg.size * self.arch.byte_width)
                     self._tag_definitions_of_atom(atom, func_addr_int)
@@ -1215,6 +1236,8 @@ class SimEngineRDVEX(
                                 min_stack_offset = subargloc.stack_offset
                             elif min_stack_offset > subargloc.stack_offset:
                                 min_stack_offset = subargloc.stack_offset
+
+                            arg_stack_change += subargloc.size
                         elif isinstance(subargloc, SimRegArg):
                             self.state.add_register_use(subargloc.reg_offset, subargloc.size, code_loc)
 
@@ -1238,6 +1261,7 @@ class SimEngineRDVEX(
                             atom = Register(subargloc.reg_offset, subargloc.size)
                             self._tag_definitions_of_atom(atom, func_addr_int)
                         elif isinstance(subargloc, SimStackArg):
+                            arg_stack_change += subargloc.size
                             if min_stack_offset is None:
                                 min_stack_offset = subargloc.stack_offset
                             elif min_stack_offset > subargloc.stack_offset:
@@ -1287,13 +1311,19 @@ class SimEngineRDVEX(
                     MultiValues(offset_to_values={0: {self.state.top(reg_size * self.arch.byte_width)}}),
                 )
 
-        if self.arch.call_pushes_ret is True:
-            # pop return address if necessary
-            sp: MultiValues = self.state.register_definitions.load(self.arch.sp_offset, size=self.arch.bytes)
-            sp_v = sp.one_value()
-            if sp_v is not None and not self.state.is_top(sp_v):
+        sp: MultiValues = self.state.register_definitions.load(self.arch.sp_offset, size=self.arch.bytes)
+        sp_v = sp.one_value()
+        if sp_v is not None and not self.state.is_top(sp_v):
+            if self.arch.call_pushes_ret is True:
+                # pop return address if necessary
                 sp_addr = sp_v - self.arch.stack_change
+            else:
+                sp_addr = sp_v
 
+            sp_addr = sp_addr - arg_stack_change
+
+            if self.arch.call_pushes_ret or arg_stack_change:
+                # if the sp value changed
                 atom = Register(self.arch.sp_offset, self.arch.bytes)
                 tag = ReturnValueTag(
                     function=func_addr_int, metadata={"tagged_by": "SimEngineRDVEX._handle_function_cc"}
