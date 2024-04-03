@@ -1185,6 +1185,10 @@ class SimCCCdecl(SimCC):
         if isinstance(arg_type, (SimTypeArray, SimTypeFixedSizeArray)):  # hack
             arg_type = SimTypePointer(arg_type.elem_type).with_arch(self.arch)
         locs_size = 0
+        if arg_type.size == NotImplemented:
+            arg_type = SimTypePointer(SimTypeBottom()).with_arch(self.arch)
+            l.warning("`size` not implemented for %s, treating as void pointer", arg_type)
+
         byte_size = arg_type.size // self.arch.byte_width
         locs = []
         while locs_size < byte_size:
