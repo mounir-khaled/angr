@@ -318,10 +318,11 @@ class SimEngineRDVEX(
 
     def _expr(self, expr) -> MultiValues:
         data = super()._expr(expr)
-        if data is None:
+        if data is None or any(isinstance(v, claripy.ast.fp.FP) for valueset in data.values() for v in valueset):
             bits = expr.result_size(self.tyenv)
             top = self.state.top(bits)
             data = MultiValues(top)
+
         return data
 
     def _handle_RdTmp(self, expr: pyvex.IRExpr.RdTmp) -> Optional[MultiValues]:
